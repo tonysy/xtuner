@@ -70,6 +70,7 @@ train_dataset = dict(
     type=build_packed_dataset,
     dataset_cfg=dict(
         type=load_intern_repo_dataset,
+        triples=v19rc14_triples,
         folder=dataset_folder,
         min_length=0
     ),
