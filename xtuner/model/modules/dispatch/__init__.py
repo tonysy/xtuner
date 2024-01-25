@@ -161,9 +161,13 @@ def replace_internlm_rote(model):
 def replace_internlm2_rote(model):
     from .internlm2 import InternLM2RotaryEmbedding
 
-    # rotary_base = model.config.rope_theta
-    rotary_base = model.config.rotary['base']
-    
+    if hasattr(model.config, 'rope_theta'):
+        rotary_base = model.config.rope_theta # v4.11.0
+    elif hasattr(model.config, 'rotary'):
+        rotary_base = model.config.rotary['base'] # v3.0.0
+    else:
+        rotary_base = 1000000
+
     def traverse(module):
         for name, child in module.named_children():
             if type(child).__name__ in (
