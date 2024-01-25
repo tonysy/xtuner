@@ -6,12 +6,13 @@ from torch.optim import AdamW
 from torch.utils.data import BatchSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from xtuner.dataset.collate_fns import intern_repo_collate_fn
+from xtuner.dataset.collate_fns import default_collate_fn
 from xtuner.dataset.intern_repo import (build_packed_dataset,
-                                        load_intern_repo_dataset)
+                                        load_intern_repo_tokenized_dataset)
 from xtuner.dataset.samplers import InternlmRepoSampler
-from xtuner.engine import (DatasetInfoHook, EvaluateChatHook,
-                           LocalAttnArgsToMessageHubHook, ThroughputHook)
+from xtuner.engine import (DatasetInfoHook, EvaluateChatHook, ThroughputHook,
+                           VarlenAttnArgsToMessageHubHook)
+from xtuner.engine.runner import TrainLoop
 from xtuner.model import SupervisedFinetune
 from xtuner.utils import PROMPT_TEMPLATE
 
@@ -20,7 +21,7 @@ from xtuner.utils import PROMPT_TEMPLATE
 #######################################################################
 # Model
 pretrained_model_name_or_path = '/mnt/petrelfs/share_data/caoweihan/official_Ampere_7B_1_0_0'  # noqa: E501
-use_local_attn = True
+use_varlen_attn = True
 
 # Data
 dataset_folder = '/mnt/petrelfs/share_data/caoweihan/chatml_llamav13_32k/train'  # noqa: E501
@@ -40,6 +41,10 @@ weight_decay = 0.01
 max_norm = 1  # grad clip
 warm_up_ratio = 0.025
 
+# Save
+save_steps = 20
+save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
+
 # Evaluate the generation performance during the training
 evaluation_freq = 500
 SYSTEM = ''
@@ -58,7 +63,7 @@ tokenizer = dict(
 
 model = dict(
     type=SupervisedFinetune,
-    use_local_attn=use_local_attn,
+    use_varlen_attn=use_varlen_attn,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=pretrained_model_name_or_path,
@@ -70,7 +75,10 @@ model = dict(
 train_dataset = dict(
     type=build_packed_dataset,
     dataset_cfg=dict(
-        type=load_intern_repo_dataset, folder=dataset_folder, min_length=0),
+        type=load_intern_repo_tokenized_dataset,
+        folder=dataset_folder,
+        min_length=0,
+        file_type='.bin'),
     packed_length=max_length,
     seed=1024)
 
@@ -80,10 +88,7 @@ train_dataloader = dict(
     dataset=train_dataset,
     sampler=dict(type=InternlmRepoSampler, shuffle=True, seed=1024),
     batch_sampler=dict(type=BatchSampler, drop_last=True, batch_size=1),
-    collate_fn=dict(
-        type=intern_repo_collate_fn,
-        packed_length=max_length,
-        use_local_attn=use_local_attn))
+    collate_fn=dict(type=default_collate_fn, use_varlen_attn=use_varlen_attn))
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -118,7 +123,7 @@ param_scheduler = [
 ]
 
 # train, val, test setting
-train_cfg = dict(by_epoch=True, max_epochs=max_epochs, val_interval=1)
+train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 
 #######################################################################
 #                           PART 5  Runtime                           #
@@ -136,7 +141,7 @@ custom_hooks = [
         system=SYSTEM,
         prompt_template=prompt_template),
     dict(type=ThroughputHook),
-    dict(type=LocalAttnArgsToMessageHubHook, )
+    dict(type=VarlenAttnArgsToMessageHubHook, )
 ]
 
 # configure default hooks
@@ -144,11 +149,15 @@ default_hooks = dict(
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 100 iterations.
-    logger=dict(type=LoggerHook, interval=1),
+    logger=dict(type=LoggerHook, log_metric_by_epoch=False, interval=1),
     # enable the parameter scheduler.
     param_scheduler=dict(type=ParamSchedulerHook),
-    # save checkpoint per epoch.
-    checkpoint=dict(type=CheckpointHook, interval=1),
+    # save checkpoint per `save_steps`.
+    checkpoint=dict(
+        type=CheckpointHook,
+        by_epoch=False,
+        interval=save_steps,
+        max_keep_ckpts=save_total_limit),
     # set sampler seed in distributed evrionment.
     sampler_seed=dict(type=DistSamplerSeedHook),
 )
@@ -179,4 +188,6 @@ resume = False
 randomness = dict(seed=None, deterministic=False)
 
 log_processor = dict(
-    window_size=1, mean_pattern=r'.*(loss|time|data_time|grad_norm|tflops).*')
+    by_epoch=False,
+    window_size=1,
+    mean_pattern=r'.*(loss|time|data_time|grad_norm|tflops).*')

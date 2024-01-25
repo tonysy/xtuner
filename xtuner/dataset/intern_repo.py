@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import ast
 import itertools as it
 import json
 import mmap
@@ -9,13 +10,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from datasets import Dataset
+from datasets import Dataset, load_dataset, load_from_disk
 from mmengine import print_log
 from torch import distributed as dist
 from torch.utils.data import ConcatDataset
-from tqdm import tqdm
 
+from xtuner.dataset.map_fns import openai_map_fn
 from xtuner.registry import BUILDER
+from .huggingface import process
 
 
 class JsonlDataset(torch.utils.data.Dataset):
@@ -228,26 +230,99 @@ class PackedDataset(torch.utils.data.Dataset):
                                token_id_after)
 
 
-def load_intern_repo_dataset(folder, triples, min_length=0):
+def load_intern_repo_tokenized_dataset(folder,
+                                       min_length=0,
+                                       data_order_path=None,
+                                       file_type='.bin'):
     assert os.path.exists(folder), f'{folder} does not exist.'
     datasets = []
 
-    for root, dirs, files in triples:
-        dirs.sort()
-        print_log(f'Reading {root}...', logger='current')
+    if data_order_path is not None:
+        data_order = load_dataset(
+            'text', data_files=data_order_path, split='train')['text']
+        for i, fp in enumerate(data_order):
+            data_order[i] = os.path.join(folder, fp)
+    else:
+        triples = list(os.walk(folder, followlinks=True))
+        data_order = []
+        for root, dirs, files in triples:
+            dirs.sort()
+            for fn in sorted(files):
+                if fn.endswith(file_type):
+                    fp = os.path.join(root, fn)
+                    data_order.append(fp)
 
-        for fn in tqdm(
-                sorted(files),
-                total=len(files),
-                leave=False,
-                disable=dist.get_rank() != 0):
-            if fn.endswith('.bin'):
-                fp = os.path.join(root, fn)
-                ds = JsonlDataset(fp, min_length=min_length)
+    for fp in data_order:
+        print_log(f'Reading {fp}...', logger='current')
+        ds = JsonlDataset(fp, min_length=min_length)
 
-                if len(ds) == 0:
-                    continue
-                datasets.append(ds)
+        if len(ds) == 0:
+            continue
+        datasets.append(ds)
+
+    return datasets
+
+
+def load_intern_repo_untokenized_dataset(processed_dataset_dict_path=None,
+                                         folder=None,
+                                         tokenizer=None,
+                                         max_length=None,
+                                         template_map_fn=None,
+                                         data_order_path=None,
+                                         file_type='.json'):
+
+    assert processed_dataset_dict_path or (folder and tokenizer and max_length)
+
+    if processed_dataset_dict_path is not None:
+        ds = load_from_disk(processed_dataset_dict_path)
+        datasets = []
+        for key, data in ds.items():
+            datasets.append((key, data))
+        datasets = sorted(datasets, key=lambda x: int(x[0]))
+        datasets = [x[1] for x in datasets]
+        return datasets
+
+    assert os.path.exists(folder), f'{folder} does not exist.'
+    datasets = []
+
+    if data_order_path is not None:
+        data_order = load_dataset(
+            'text', data_files=data_order_path, split='train')['text']
+        for i, fp in enumerate(data_order):
+            data_order[i] = os.path.join(folder, fp)
+    else:
+        triples = list(os.walk(folder, followlinks=True))
+        data_order = []
+        for root, dirs, files in triples:
+            dirs.sort()
+            for fn in sorted(files):
+                if fn.endswith(file_type):
+                    fp = os.path.join(root, fn)
+                    data_order.append(fp)
+
+    for fp in data_order:
+        print_log(f'Reading {fp}...', logger='current')
+        dataset = []
+        with open(fp) as file:
+            lines = file.readlines()
+            for line in lines:
+                line = ast.literal_eval(line)
+                dataset.append({'messages': line})
+        dataset = Dataset.from_list(dataset)
+        dataset = process(
+            dataset,
+            tokenizer,
+            max_length,
+            dataset_map_fn=openai_map_fn,
+            template_map_fn=template_map_fn,
+            remove_unused_columns=True,
+            pack_to_max_length=False,
+            map_num_proc=32)
+
+        if len(dataset) == 0:
+            continue
+
+        datasets.append(dataset)
 
     return datasets
 
@@ -283,45 +358,3 @@ def build_packed_dataset(*args, **kwargs):
         objects = [None]
     dist.broadcast_object_list(objects, src=0)
     return objects[0]
-
-
-def process_intern_repo_dataset(folder,
-                                packed_length=8192,
-                                min_length=0,
-                                seed=1024):
-
-    assert os.path.exists(folder), f'{folder} does not exist.'
-    datasets = []
-    if dist.get_rank() == 0:
-        triples = [list(os.walk(folder, followlinks=True))]
-    else:
-        triples = [None]
-    dist.broadcast_object_list(triples, src=0)
-    triples = triples[0]
-
-    for root, dirs, files in triples:
-        dirs.sort()  # Let the folder need to be returned in a fixed order
-        if dist.get_rank() == 0:
-            print_log(f'Reading {root}...', logger='current')
-        num_token_in_folder = 0
-
-        for fn in tqdm(
-                sorted(files),
-                total=len(files),
-                leave=False,
-                disable=dist.get_rank() != 0):
-            if fn.endswith('.bin'):
-                fp = os.path.join(root, fn)
-                ds = JsonlDataset(fp, min_length=min_length)
-
-                if len(ds) == 0:
-                    continue
-
-                ds = PackedDataset(ds, packed_length, seed=seed)
-
-                num_token_in_folder += len(ds) * packed_length
-                datasets.append(ds)
-
-    dataset = ConcatDataset(datasets=datasets)
-
-    return dataset

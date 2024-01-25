@@ -36,21 +36,21 @@ NO_ATTN_WEIGHTS_MSG = (
     'possible to return the `attn_weights`.')
 
 
-def dispatch_llama_attn_forward(model, use_local_attn):
+def dispatch_llama_attn_forward(model, use_varlen_attn):
     if not SUPPORT_FLASH:
         return
-    if use_local_attn:
+    if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
-            'flash_attn and triton is required if you want to use local_attn.'
-    from .llama import llama_attn_forward, llama_local_attn_forward
+            'flash_attn and triton is required if you want to use varlen_attn.'
+    from .llama import llama_attn_forward, llama_varlen_attn_forward
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
         if type(module).__name__ in ('LlamaAttention', 'LlamaFlashAttention2',
                                      'LlamaSdpaAttention'):
-            if use_local_attn:
+            if use_varlen_attn:
                 print_log('dispatch llama local attn forward', 'current')
-                module.forward = types.MethodType(llama_local_attn_forward,
+                module.forward = types.MethodType(llama_varlen_attn_forward,
                                                   module)
             else:
                 print_log('dispatch llama attn forward', 'current')
@@ -69,21 +69,21 @@ def dispatch_llama_rmsnorm_forward(model):
             module.forward = types.MethodType(rms_norm_forward, module)
 
 
-def dispatch_internlm_attn_forward(model, use_local_attn):
+def dispatch_internlm_attn_forward(model, use_varlen_attn):
     if not SUPPORT_FLASH:
         return
-    if use_local_attn:
+    if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
-            'flash_attn and triton is required if you want to use local_attn.'
+            'flash_attn and triton is required if you want to use varlen_attn.'
 
-    from .internlm import internlm_attn_forward, internlm_local_attn_forward
+    from .internlm import internlm_attn_forward, internlm_varlen_attn_forward
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
         if type(module).__name__ == 'InternLMAttention':
-            if use_local_attn:
+            if use_varlen_attn:
                 print_log('dispatch internlm local attn forward', 'current')
-                module.forward = types.MethodType(internlm_local_attn_forward,
+                module.forward = types.MethodType(internlm_varlen_attn_forward,
                                                   module)
             else:
                 print_log('dispatch internlm attn forward', 'current')
@@ -91,22 +91,23 @@ def dispatch_internlm_attn_forward(model, use_local_attn):
                                                   module)
 
 
-def dispatch_internlm2_attn_forward(model, use_local_attn):
+def dispatch_internlm2_attn_forward(model, use_varlen_attn):
     if not SUPPORT_FLASH:
         return
-    if use_local_attn:
+    if use_varlen_attn:
         assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
-            'flash_attn and triton is required if you want to use local_attn.'
+            'flash_attn and triton is required if you want to use varlen_attn.'
 
-    from .internlm2 import internlm2_attn_forward, internlm2_local_attn_forward
+    from .internlm2 import (internlm2_attn_forward,
+                            internlm2_varlen_attn_forward)
 
     print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
     for module in model.modules():
         if type(module).__name__ == 'InternLM2Attention':
-            if use_local_attn:
+            if use_varlen_attn:
                 print_log('dispatch internlm2 local attn forward', 'current')
-                module.forward = types.MethodType(internlm2_local_attn_forward,
-                                                  module)
+                module.forward = types.MethodType(
+                    internlm2_varlen_attn_forward, module)
             else:
                 print_log('dispatch internlm2 attn forward', 'current')
                 module.forward = types.MethodType(internlm2_attn_forward,
@@ -161,12 +162,8 @@ def replace_internlm_rote(model):
 def replace_internlm2_rote(model):
     from .internlm2 import InternLM2RotaryEmbedding
 
-    if hasattr(model.config, 'rope_theta'):
-        rotary_base = model.config.rope_theta # v4.11.0
-    elif hasattr(model.config, 'rotary'):
-        rotary_base = model.config.rotary['base'] # v3.0.0
-    else:
-        rotary_base = 1000000
+    # rotary_base = model.config.rope_theta
+    rotary_base = 1000000
 
     def traverse(module):
         for name, child in module.named_children():
@@ -228,18 +225,69 @@ def dispatch_yi_attn_forward(model):
             module.forward = types.MethodType(yi_attn_forward, module)
 
 
-def dispatch_modules(model, use_local_attn=False):
+def dispatch_mistral_attn_forward(model, use_varlen_attn):
+    if (not SUPPORT_FLASH) or (not use_varlen_attn):
+        return
+    if use_varlen_attn:
+        assert SUPPORT_FLASH2 and SUPPORT_TRITON, \
+            'flash_attn and triton is required if you want to use varlen_attn.'
+
+    from .mistral import mistral_varlen_attn_forward
+
+    print_log(NO_ATTN_WEIGHTS_MSG, 'current', logging.WARNING)
+    for module in model.modules():
+        if type(module).__name__ in ('MistralAttention',
+                                     'MistralFlashAttention2'):
+            print_log('dispatch mistral local attn forward', 'current')
+            module.forward = types.MethodType(mistral_varlen_attn_forward,
+                                              module)
+
+
+def dispatch_mistral_rmsnorm_forward(model):
+    if not SUPPORT_TRITON:
+        return
+
+    from .triton_kernels import rms_norm_forward
+
+    for module in model.modules():
+        if type(module).__name__ == 'MistralRMSNorm':
+            print_log('dispatch mistral rmsnorm forward', 'current')
+            module.forward = types.MethodType(rms_norm_forward, module)
+
+
+def replace_mistral_rote(model):
+    from .mistral import MistralRotaryEmbedding
+
+    rotary_base = model.config.rope_theta
+
+    def traverse(module):
+        for name, child in module.named_children():
+            if type(child).__name__ == 'MistralRotaryEmbedding':
+                print_log('replace mistral rope', 'current')
+                dim_model = child.inv_freq.shape[0] * 2
+                child_new = MistralRotaryEmbedding(
+                    dim_model, child.max_seq_len_cached, rotary_base).to(
+                        device=child.inv_freq.device,
+                        dtype=child.inv_freq.dtype)
+                setattr(module, name, child_new)
+            else:
+                traverse(child)
+
+    traverse(model)
+
+
+def dispatch_modules(model, use_varlen_attn=False):
     model_name = model.__class__.__name__.lower()
     if 'internlm2' in model_name:
-        dispatch_internlm2_attn_forward(model, use_local_attn)
+        dispatch_internlm2_attn_forward(model, use_varlen_attn)
         dispatch_internlm2_rmsnorm_forward(model)
         replace_internlm2_rote(model)
     elif 'internlm' in model_name:
-        dispatch_internlm_attn_forward(model, use_local_attn)
+        dispatch_internlm_attn_forward(model, use_varlen_attn)
         dispatch_internlm_rmsnorm_forward(model)
         replace_internlm_rote(model)
     elif 'llama' in model_name:
-        dispatch_llama_attn_forward(model, use_local_attn)
+        dispatch_llama_attn_forward(model, use_varlen_attn)
         dispatch_llama_rmsnorm_forward(model)
     elif 'baichuan' in model_name:
         dispath_baichuan2_norm_head_forward(model)
@@ -247,6 +295,10 @@ def dispatch_modules(model, use_local_attn=False):
         dispath_baichuan_13b_attn_forward(model)
     elif 'yi' in model_name:
         dispatch_yi_attn_forward(model)
+    elif 'mistral' in model_name:
+        dispatch_mistral_attn_forward(model, use_varlen_attn)
+        dispatch_mistral_rmsnorm_forward(model)
+        replace_mistral_rote(model)
 
 
 __all__ = ['dispatch_modules']
