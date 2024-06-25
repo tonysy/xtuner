@@ -335,7 +335,7 @@ class LLaSTDataset(Dataset):
         self.cv_dir = cv_dir
         self.postfix = '.mp3.wav'
         self.audio_folder = audio_folder
-        if offline_processed_text_folder is not None:
+        if offline_processed_text_folder is not None and os.path.exists(offline_processed_text_folder):
             self.text_data = load_from_disk(offline_processed_text_folder)
         else:
             raw_data, ids = self.get_data_ids(
