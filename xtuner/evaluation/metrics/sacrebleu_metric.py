@@ -67,7 +67,7 @@ class SacreBLEUMetric(BaseMetric):
                 json.dump(self.results, file, indent=4)
             # import pdb;pdb.set_trace()
 
-    def compute_metrics(self, results: list) -> dict:
+    def compute_metrics(self, results: list, tokenize="13a") -> dict:
         """Compute the metrics from processed results.
 
         Args:
@@ -77,6 +77,11 @@ class SacreBLEUMetric(BaseMetric):
             dict: The computed metrics. The keys are the names of the metrics,
             and the values are corresponding results.
         """
+        if "en_zh" in self.epoch_num:
+            tokenize = "zh"
+        elif "en_ja" in self.epoch_num:
+            tokenize = "ja-mecab"
+
         file_path = os.path.join(self.dump_dir,
                                  f'inference_results{self.epoch_num}.json')
 
@@ -92,7 +97,7 @@ class SacreBLEUMetric(BaseMetric):
         references = [item.lower() for item in references]
         
         metric_results = self.sacrebleu.compute(
-            predictions=predictions, references=references)
+            predictions=predictions, references=references, tokenize=tokenize)
         self._print_results(metric_results)
         return metric_results
 
